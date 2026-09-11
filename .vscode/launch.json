@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Backend: FastAPI (uvicorn)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["server:app", "--host", "0.0.0.0", "--port", "8001", "--reload"],
+      "cwd": "${workspaceFolder}/backend",
+      "jinja": true,
+      "justMyCode": false
+    },
+    {
+      "name": "Backend: seed demo data",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/seed.py",
+      "cwd": "${workspaceFolder}/backend",
+      "justMyCode": false
+    }
+  ],
+  "compounds": []
+}
