@@ -54,7 +54,7 @@ async def login(payload: LoginRequest, response: Response):
         # "none" is required for cross-site deployments (frontend on Vercel,
         # backend on Render are different origins); it must be paired with
         # secure=True, which is fine since both are served over HTTPS.
-        samesite="none",
+        samesite="lax",
         secure=True,
         max_age=SESSION_DAYS * 86400,
         path="/",
