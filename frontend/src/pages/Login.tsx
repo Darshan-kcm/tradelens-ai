@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { TradeLensLogo } from "@/components/brand/TradeLensLogo";
-import { DemoDataBadge, DISCLAIMER_TEXT } from "@/components/common/Widgets";
+import { DISCLAIMER_TEXT } from "@/components/common/Widgets";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -18,16 +18,22 @@ const DEMO_PASSWORD = "demo123";
 
 export default function Login() {
   const navigate = useNavigate();
-  const [email, setEmail] = useState(DEMO_EMAIL);
-  const [password, setPassword] = useState(DEMO_PASSWORD);
+  const [mode, setMode] = useState<"signin" | "signup">("signin");
+
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+
+  const onAuthed = (user: User, verb: string) => {
+    beginSession();
+    toast.success(`${verb}, ${user.name}`);
+    navigate("/dashboard", { replace: true });
+  };
 
   const login = useMutation({
     mutationFn: (body: { email: string; password: string }) => apiPost<User>("/auth/login", body),
-    onSuccess: (user) => {
-      beginSession();
-      toast.success(`Welcome back, ${user.name}`);
-      navigate("/dashboard", { replace: true });
-    },
+    onSuccess: (user) => onAuthed(user, "Welcome back"),
     onError: (error) => {
       const message =
         error instanceof ApiError && error.status === 401
@@ -36,6 +42,38 @@ export default function Login() {
       toast.error(message);
     },
   });
+
+  const signup = useMutation({
+    mutationFn: (body: { name: string; email: string; password: string }) =>
+      apiPost<User>("/auth/signup", body),
+    onSuccess: (user) => onAuthed(user, "Welcome"),
+    onError: (error) => {
+      const message =
+        error instanceof ApiError && (error.status === 409 || error.status === 422)
+          ? String((error.body as { detail?: string } | null)?.detail ?? "Could not create your account.")
+          : "Could not reach the API. Make sure the backend is running.";
+      toast.error(message);
+    },
+  });
+
+  const isPending = login.isPending || signup.isPending;
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (mode === "signin") {
+      login.mutate({ email: email.trim().toLowerCase(), password });
+      return;
+    }
+    if (password.length < 6) {
+      toast.error("Password must be at least 6 characters.");
+      return;
+    }
+    if (password !== confirmPassword) {
+      toast.error("Passwords don't match.");
+      return;
+    }
+    signup.mutate({ name: name.trim(), email: email.trim().toLowerCase(), password });
+  };
 
   return (
     <div className="grid min-h-screen lg:grid-cols-[1.1fr_1fr]">
@@ -56,7 +94,7 @@ export default function Login() {
           </p>
           <ul className="mt-8 space-y-3 text-sm text-slate-300">
             {[
-              "36 demo assets across 7 markets",
+              "36 assets across 7 markets",
               "RSI, EMA 21/50/200, SMA and volume analytics",
               "Rule-based screener with a composite Research Score",
               "Long-only backtester with equity curve and trade log",
@@ -78,23 +116,33 @@ export default function Login() {
             <span className="font-heading text-lg font-extrabold tracking-tight">TradeLens AI</span>
           </div>
           <div className="mb-6">
-            <DemoDataBadge />
-            <h2 className="mt-4 font-heading text-2xl font-bold tracking-tight">Sign in to your workspace</h2>
+            <h2 className="font-heading text-2xl font-bold tracking-tight">
+              {mode === "signin" ? "Sign in to your workspace" : "Create your account"}
+            </h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              This is a demo login for the college project — credentials are pre-filled.
+              {mode === "signin"
+                ? "Enter your email and password to continue."
+                : "Takes less than a minute — just a name, email and password."}
             </p>
           </div>
 
           <Card className="shadow-sm">
             <CardContent className="p-6">
-              <form
-                className="space-y-4"
-                data-testid="login-form"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  login.mutate({ email: email.trim().toLowerCase(), password });
-                }}
-              >
+              <form className="space-y-4" data-testid="login-form" onSubmit={handleSubmit}>
+                {mode === "signup" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="name">Name</Label>
+                    <Input
+                      id="name"
+                      type="text"
+                      autoComplete="name"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      data-testid="signup-name-input"
+                      required
+                    />
+                  </div>
+                )}
                 <div className="space-y-2">
                   <Label htmlFor="email">Email</Label>
                   <Input
@@ -112,34 +160,66 @@ export default function Login() {
                   <Input
                     id="password"
                     type="password"
-                    autoComplete="current-password"
+                    autoComplete={mode === "signin" ? "current-password" : "new-password"}
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     data-testid="login-password-input"
                     required
                   />
                 </div>
+                {mode === "signup" && (
+                  <div className="space-y-2">
+                    <Label htmlFor="confirm-password">Confirm password</Label>
+                    <Input
+                      id="confirm-password"
+                      type="password"
+                      autoComplete="new-password"
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      data-testid="signup-confirm-password-input"
+                      required
+                    />
+                  </div>
+                )}
                 <Button
                   type="submit"
                   className="w-full"
-                  disabled={login.isPending}
+                  disabled={isPending}
                   data-testid="login-submit-button"
                 >
                   <Lock className="size-4" />
-                  {login.isPending ? "Signing in…" : "Sign in"}
+                  {isPending ? "Please wait…" : mode === "signin" ? "Sign in" : "Create account"}
                 </Button>
               </form>
 
-              <div
-                className="mt-5 rounded-md border border-dashed border-border bg-muted/50 p-3 text-xs text-muted-foreground"
-                data-testid="login-demo-hint"
+              <button
+                type="button"
+                onClick={() => setMode(mode === "signin" ? "signup" : "signin")}
+                className="mt-4 w-full text-center text-sm text-muted-foreground hover:text-foreground"
+                data-testid="login-mode-toggle"
               >
-                <div className="flex items-center gap-2 font-semibold text-foreground">
-                  <ShieldCheck className="size-3.5" /> Demo credentials
+                {mode === "signin" ? (
+                  <>
+                    Don't have an account? <span className="font-semibold text-foreground">Sign up</span>
+                  </>
+                ) : (
+                  <>
+                    Already have an account? <span className="font-semibold text-foreground">Sign in</span>
+                  </>
+                )}
+              </button>
+
+              {mode === "signin" && (
+                <div
+                  className="mt-5 rounded-md border border-dashed border-border bg-muted/50 p-3 text-xs text-muted-foreground"
+                  data-testid="login-demo-hint"
+                >
+                  <div className="flex items-center gap-2 font-semibold text-foreground">
+                    <ShieldCheck className="size-3.5" /> Try it without an account
+                  </div>
+                  <div className="mt-1.5 font-mono">{DEMO_EMAIL} / {DEMO_PASSWORD}</div>
                 </div>
-                <div className="mt-1.5 font-mono">{DEMO_EMAIL} / {DEMO_PASSWORD}</div>
-                <div className="font-mono">student@tradelens.ai / student123</div>
-              </div>
+              )}
             </CardContent>
           </Card>
           <p className="mt-6 text-[11px] leading-relaxed text-muted-foreground">

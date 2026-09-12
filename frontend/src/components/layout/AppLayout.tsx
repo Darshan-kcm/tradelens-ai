@@ -18,7 +18,6 @@ import {
 import { useState } from "react";
 import { Link, NavLink, Navigate, Outlet, useLocation } from "react-router-dom";
 import { TradeLensWordmark } from "@/components/brand/TradeLensLogo";
-import { DemoDataBadge } from "@/components/common/Widgets";
 import { Button } from "@/components/ui/button";
 import { useCurrentUser, useTheme } from "@/hooks/useApp";
 import { apiGet } from "@/lib/api";
@@ -202,9 +201,8 @@ export default function AppLayout() {
               {current}
             </span>
           </div>
-          <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3">
             <SessionStrip />
-            <DemoDataBadge className="hidden sm:inline-flex" />
             <ThemeToggleButton />
           </div>
         </header>

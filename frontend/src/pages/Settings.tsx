@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { LogOut, Moon, Sun } from "lucide-react";
-import { DemoDataBadge, DISCLAIMER_TEXT, PageHeader, SectionCard } from "@/components/common/Widgets";
+import { DISCLAIMER_TEXT, PageHeader, SectionCard } from "@/components/common/Widgets";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -10,9 +10,9 @@ import { endSession } from "@/lib/session";
 import type { Market } from "@/lib/types";
 
 const DATA_SOURCES = [
-  { label: "Market & historical prices", status: "Demo generator", note: "backend/lib/demodata.py" },
-  { label: "News & sentiment", status: "Demo generator", note: "swap for a news API client" },
-  { label: "Fundamentals", status: "Demo generator", note: "equities only; others marked unavailable" },
+  { label: "Market & historical prices", status: "Live", note: "Twelve Data, falls back per-symbol if unavailable" },
+  { label: "News & sentiment", status: "Live", note: "Marketaux, falls back per-symbol if unavailable" },
+  { label: "Fundamentals", status: "Live / fallback", note: "equities only; some fields need a paid data tier" },
   { label: "Technical indicators", status: "Computed", note: "backend/lib/analytics.py" },
   { label: "Backtesting engine", status: "Computed", note: "backend/lib/backtester.py" },
 ];
@@ -46,7 +46,7 @@ export default function Settings() {
           </div>
         </SectionCard>
 
-        <SectionCard testId="settings-account-card" title="Account" subtitle="Demo session managed by an httpOnly cookie.">
+         <SectionCard testId="settings-account-card" title="Account" subtitle="Session managed by a secure httpOnly cookie.">
           <div className="space-y-3">
             <div className="rounded-md border border-border p-4">
               <div className="text-sm font-semibold" data-testid="settings-user-name">
@@ -66,11 +66,10 @@ export default function Settings() {
         </SectionCard>
       </div>
 
-      <SectionCard
+         <SectionCard
         testId="settings-data-card"
         title="Data sources"
-        subtitle="Every module reads through the FastAPI layer, so a real provider can replace a demo generator without touching the frontend."
-        right={<DemoDataBadge />}
+        subtitle="Every module reads through the FastAPI layer, sourced live where the provider supports it."
       >
         <ul className="divide-y divide-border">
           {DATA_SOURCES.map((row) => (
@@ -79,7 +78,7 @@ export default function Settings() {
                 <div className="text-sm font-medium">{row.label}</div>
                 <div className="mt-0.5 font-mono text-[11px] text-muted-foreground">{row.note}</div>
               </div>
-              <Badge variant={row.status === "Computed" ? "secondary" : "outline"}>{row.status}</Badge>
+             <Badge variant={row.status === "Demo generator" ? "outline" : "secondary"}>{row.status}</Badge>
             </li>
           ))}
         </ul>

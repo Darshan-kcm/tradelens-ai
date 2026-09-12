@@ -1,23 +1,10 @@
-import { ArrowDown, ArrowUp, Database, Minus } from "lucide-react";
+import { ArrowDown, ArrowUp, Minus } from "lucide-react";
 import type { ReactNode } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { formatPercent, scoreTone, toneClass } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
-export function DemoDataBadge({ className }: { className?: string }) {
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-md border border-amber-300 bg-amber-50 px-2 py-1 text-[10px] font-bold uppercase tracking-[0.14em] text-amber-800 dark:border-amber-800 dark:bg-amber-950/60 dark:text-amber-300",
-        className,
-      )}
-      data-testid="demo-data-badge"
-    >
-      <Database className="size-3" /> Demo Data
-    </span>
-  );
-}
 
 export function PageHeader({
   title,
@@ -36,10 +23,7 @@ export function PageHeader({
       data-testid={testId}
     >
       <div className="max-w-2xl">
-        <div className="flex items-center gap-3">
-          <h1 className="font-heading text-2xl font-bold tracking-tight md:text-[28px]">{title}</h1>
-          <DemoDataBadge />
-        </div>
+                <h1 className="font-heading text-2xl font-bold tracking-tight md:text-[28px]">{title}</h1>
         <p className="mt-2 text-sm text-muted-foreground">{description}</p>
       </div>
       {actions && <div className="flex flex-wrap items-center gap-2">{actions}</div>}
@@ -173,7 +157,7 @@ export function StateBlock({
         className="rounded-md border border-dashed border-border bg-muted/40 p-6 text-center text-sm text-muted-foreground"
         data-testid={`${testId}-error`}
       >
-        Backend data is unavailable right now. Start the API and refresh to load demo data.
+      Backend data is unavailable right now. Start the API and refresh to try again.
       </div>
     );
   }

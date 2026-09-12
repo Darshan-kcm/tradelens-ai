@@ -1,4 +1,10 @@
-"""Demo authentication: httpOnly cookie session, no tokens in JSON."""
+"""Authentication: httpOnly cookie session, no tokens in JSON.
+
+Two account types share the same users/sessions collections:
+- Real accounts, created via POST /auth/signup, password hashed with hash_password.
+- Two seeded demo accounts (demo@tradelens.ai / student@tradelens.ai) inserted by
+  backend/seed.py, kept working so the app can still be tried without registering.
+"""
 from __future__ import annotations
 
 import hashlib
@@ -6,7 +12,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Cookie, HTTPException, Response
-from models.schemas import LoginRequest, User
+from models.schemas import LoginRequest, SignupRequest, User
 
 from lib.db import db
 
@@ -34,11 +40,7 @@ async def current_user(token: str | None) -> dict | None:
     return await db.users.find_one({"id": session["user_id"]}, {"_id": 0})
 
 
-@router.post("/login", response_model=User)
-async def login(payload: LoginRequest, response: Response):
-    user = await db.users.find_one({"email": payload.email.strip().lower()}, {"_id": 0})
-    if not user or user["password_hash"] != hash_password(payload.password):
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+async def _start_session(user: dict, response: Response) -> None:
     token = str(uuid.uuid4())
     await db.sessions.insert_one(
         {
@@ -51,14 +53,45 @@ async def login(payload: LoginRequest, response: Response):
         COOKIE_NAME,
         token,
         httponly=True,
-        # "none" is required for cross-site deployments (frontend on Vercel,
-        # backend on Render are different origins); it must be paired with
-        # secure=True, which is fine since both are served over HTTPS.
         samesite="lax",
         secure=True,
         max_age=SESSION_DAYS * 86400,
         path="/",
     )
+
+
+@router.post("/signup", response_model=User, status_code=201)
+async def signup(payload: SignupRequest, response: Response):
+    email = payload.email.strip().lower()
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Name is required")
+    if len(payload.password) < 6:
+        raise HTTPException(status_code=422, detail="Password must be at least 6 characters")
+
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+    user = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "name": name,
+        "role": "analyst",
+        "password_hash": hash_password(payload.password),
+        "created_at": datetime.now(timezone.utc),
+    }
+    await db.users.insert_one(user)
+    await _start_session(user, response)
+    return User(id=user["id"], email=user["email"], name=user["name"], role=user["role"])
+
+
+@router.post("/login", response_model=User)
+async def login(payload: LoginRequest, response: Response):
+    user = await db.users.find_one({"email": payload.email.strip().lower()}, {"_id": 0})
+    if not user or user["password_hash"] != hash_password(payload.password):
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+    await _start_session(user, response)
     return User(id=user["id"], email=user["email"], name=user["name"], role=user["role"])
 
 

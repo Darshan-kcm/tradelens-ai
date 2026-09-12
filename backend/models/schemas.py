@@ -306,6 +306,12 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class SignupRequest(BaseModel):
+    name: str
+    email: str
+    password: str
+
+
 class User(BaseModel):
     id: str
     email: str
