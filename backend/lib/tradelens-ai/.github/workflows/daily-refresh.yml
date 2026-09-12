@@ -1,0 +1,42 @@
+name: Daily live data refresh
+
+# Free scheduled job (GitHub Actions, no Render cron needed) that re-runs
+# backend/seed.py once a day so prices/fundamentals/news stay current
+# against the live Atlas database. Uses the same TWELVE_DATA_API_KEY /
+# MARKETAUX_API_KEY / FMP_API_KEY / MONGO_URL you already use on Render —
+# add them as GitHub repo secrets (Settings -> Secrets and variables ->
+# Actions -> New repository secret) with those exact names.
+#
+# Manual run: Actions tab -> "Daily live data refresh" -> "Run workflow".
+
+on:
+  schedule:
+    # 02:00 UTC daily. GitHub may delay scheduled runs by a few minutes
+    # under load; that's fine for a once-a-day refresh.
+    - cron: "0 2 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  reseed:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run seed.py against the live database
+        env:
+          MONGO_URL: ${{ secrets.MONGO_URL }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+          TWELVE_DATA_API_KEY: ${{ secrets.TWELVE_DATA_API_KEY }}
+          MARKETAUX_API_KEY: ${{ secrets.MARKETAUX_API_KEY }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+        run: python seed.py

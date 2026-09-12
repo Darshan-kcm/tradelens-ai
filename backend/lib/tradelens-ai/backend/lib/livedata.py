@@ -1,30 +1,21 @@
 """LIVE data fetcher for TradeLens AI.
 
 Replaces backend/lib/demodata.py as the data source. Pulls real quotes, daily
-OHLCV history from Twelve Data (twelvedata.com, free tier: 800 calls/day, 8
-calls/min), fundamentals from Financial Modeling Prep for US stocks (free
-tier: 250 calls/day, US-listed only) with a Twelve Data fallback attempt,
-and finance news from Marketaux (marketaux.com, free tier). All three need a
-free API key — see README / LOCAL_SETUP for signup steps.
+OHLCV history, and company fundamentals from Twelve Data (twelvedata.com,
+free tier: 800 calls/day, 8 calls/min) and finance news from Marketaux
+(marketaux.com, free tier). Both need a free API key — see README /
+LOCAL_SETUP for signup steps.
 
 Design notes:
 - This module keeps the same UNIVERSE list and asset/bar/fundamental/news
   *shapes* as demodata.py so store.py, the routers and the frontend never
   need to change — only seed.py's import + call changes.
-- Every Twelve Data call is paced individually (see _get_json_td) to respect
-  the free tier's 8 calls/minute ceiling — earlier pacing was approximated
-  once per asset, which under-counted when an asset needed 2+ Twelve Data
-  calls (e.g. an index doing symbol_search then time_series) and burst past
-  the limit, causing unrelated symbols to fail in the same run.
+- Free tiers are rate-limited, so this fetches once per run (a periodic
+  refresh job, e.g. a daily cron / Render "Cron Job", re-runs seed.py to
+  refresh). It is NOT called per-request.
 - Every network call is wrapped so a single failed/rate-limited symbol
   doesn't kill the whole seed — it's skipped and logged, and DEMO fallback
   data is used for that symbol so the app never shows a broken page.
-- build_all() returns a per-symbol LIVE/DEMO flag so seed.py can print a
-  summary table — a bad symbol mapping or exhausted quota is then visible
-  immediately in the seed output instead of silently showing wrong numbers.
-- Index tickers are resolved via Twelve Data's own symbol_search endpoint
-  (not hardcoded), restricted to instrument_type == "Index" only — never an
-  ETF proxy, since those are frequently paid-plan-only on the free tier.
 """
 from __future__ import annotations
 
@@ -59,6 +50,15 @@ FMP_BASE = "https://financialmodelingprep.com/stable"
 
 HISTORY_DAYS = 400
 
+# Twelve Data needs an exchange suffix for NSE/BSE symbols; everything else
+# (US tickers, forex pairs, crypto, commodities) uses the plain TradeLens
+# symbol or a small remap below.
+#
+# Indices are NOT hardcoded here — index ticker conventions vary by provider
+# (e.g. "NSEI" vs "^NSEI" vs "NIFTY 50") and guessing wrong silently falls
+# back to demo data with no error, which is exactly what happened before.
+# _resolve_index_symbol() below asks Twelve Data's own symbol_search
+# endpoint for the correct ticker instead, once per run, and caches it.
 _TWELVE_DATA_SYMBOL_OVERRIDES = {
     "GOLD": "XAU/USD",
     "SILVER": "XAG/USD",
@@ -75,6 +75,8 @@ _TWELVE_DATA_SYMBOL_OVERRIDES = {
 }
 _NSE_SYMBOLS = {"RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "ITC", "TATAMOTORS", "SBIN", "SUNPHARMA", "LT", "BHARTIARTL"}
 
+# Search terms used to look up each index's real ticker via symbol_search,
+# since the TradeLens symbol itself ("NIFTY50") is never a valid API symbol.
 _INDEX_SEARCH_TERMS = {
     "NIFTY50": "NIFTY 50",
     "SENSEX": "SENSEX",
@@ -85,44 +87,17 @@ _INDEX_SEARCH_TERMS = {
 _index_symbol_cache: Dict[str, Optional[str]] = {}
 
 
-def build_assets() -> List[dict]:
-    """Asset metadata is static reference data (name/market/sector) — reuse it
-    as-is from demodata.py, just relabel the source."""
-    assets = _demo_build_assets()
-    for a in assets:
-        a["data_source"] = DATA_SOURCE
-    return assets
-
-
-async def _get_json(client: httpx.AsyncClient, url: str, params: dict, retries: int = 2) -> Optional[dict]:
-    for attempt in range(retries + 1):
-        try:
-            resp = await client.get(url, params=params, timeout=15)
-            data = resp.json()
-            if isinstance(data, dict) and data.get("status") == "error":
-                logger.warning("API error for %s: %s", params.get("symbol"), data.get("message"))
-                return None
-            return data
-        except (httpx.HTTPError, ValueError) as exc:
-            logger.warning("Request failed (attempt %s) for %s: %s", attempt + 1, params.get("symbol"), exc)
-            await asyncio.sleep(1.5 * (attempt + 1))
-    return None
-
-
-async def _get_json_td(client: httpx.AsyncClient, url: str, params: dict, retries: int = 2) -> Optional[dict]:
-    """Same as _get_json, but paced for Twelve Data's free-tier ceiling of
-    8 calls/minute. Every Twelve Data call goes through this so the limit
-    is enforced at the actual call site."""
-    if TWELVE_DATA_API_KEY:
-        await asyncio.sleep(7.6)  # ~7.9 calls/min, just under the 8/min ceiling
-    return await _get_json(client, url, params, retries=retries)
-
-
 async def _resolve_index_symbol(client: httpx.AsyncClient, tradelens_symbol: str) -> Optional[str]:
     """Look up the real ticker Twelve Data expects for an index, via their
-    own symbol_search endpoint. Only ever returns an instrument_type ==
-    "Index" match — never an ETF or other proxy instrument, since those are
-    frequently paid-plan-only on the free tier."""
+    own symbol_search endpoint, instead of a hardcoded guess. Cached for the
+    lifetime of one seed run so each index is only looked up once.
+
+    Only ever returns an instrument_type == "Index" match — never an ETF or
+    other proxy instrument. symbol_search sometimes returns ETFs (e.g.
+    "SETFNIF50" for "NIFTY 50") when no exact index match ranks first, and
+    those tracker ETFs are frequently paid-plan-only on the free tier, which
+    previously caused an API error instead of a clean fallback.
+    """
     if tradelens_symbol in _index_symbol_cache:
         return _index_symbol_cache[tradelens_symbol]
 
@@ -159,10 +134,47 @@ async def _twelve_data_symbol(client: httpx.AsyncClient, symbol: str, market: st
     return symbol
 
 
+def build_assets() -> List[dict]:
+    """Asset metadata is static reference data (name/market/sector) — reuse it
+    as-is from demodata.py, just relabel the source."""
+    assets = _demo_build_assets()
+    for a in assets:
+        a["data_source"] = DATA_SOURCE
+    return assets
+
+
+async def _get_json(client: httpx.AsyncClient, url: str, params: dict, retries: int = 2) -> Optional[dict]:
+    for attempt in range(retries + 1):
+        try:
+            resp = await client.get(url, params=params, timeout=15)
+            data = resp.json()
+            if isinstance(data, dict) and data.get("status") == "error":
+                logger.warning("API error for %s: %s", params.get("symbol"), data.get("message"))
+                return None
+            return data
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning("Request failed (attempt %s) for %s: %s", attempt + 1, params.get("symbol"), exc)
+            await asyncio.sleep(1.5 * (attempt + 1))
+    return None
+
+
+async def _get_json_td(client: httpx.AsyncClient, url: str, params: dict, retries: int = 2) -> Optional[dict]:
+    """Same as _get_json, but paced for Twelve Data's free-tier ceiling of
+    8 calls/minute. Every Twelve Data call (symbol_search, time_series,
+    statistics) goes through this so the limit is enforced at the actual
+    call site, not approximated once per asset in the outer loop — that
+    approximation under-counted when an asset needed 2+ Twelve Data calls
+    (e.g. an index: 1 symbol_search + 1 time_series) and burst past 8/min."""
+    if TWELVE_DATA_API_KEY:
+        await asyncio.sleep(7.6)  # ~7.9 calls/min, just under the 8/min ceiling
+    return await _get_json(client, url, params, retries=retries)
+
+
 async def fetch_price_history(client: httpx.AsyncClient, asset: dict) -> tuple[List[dict], bool]:
     """Daily OHLCV bars from Twelve Data, oldest first. Falls back to
-    deterministic demo bars if the API key is missing or the call fails.
-    Returns (bars, is_live)."""
+    deterministic demo bars if the API key is missing or the call fails,
+    so the app degrades gracefully instead of breaking.
+    Returns (bars, is_live) so callers can report per-symbol status."""
     if not TWELVE_DATA_API_KEY:
         return _demo_build_price_history(asset), False
 
@@ -186,7 +198,7 @@ async def fetch_price_history(client: httpx.AsyncClient, asset: dict) -> tuple[L
         return _demo_build_price_history(asset), False
 
     bars = []
-    for v in reversed(values):
+    for v in reversed(values):  # Twelve Data returns newest first
         try:
             bars.append(
                 {
@@ -210,7 +222,10 @@ _US_MARKETS = {"NASDAQ", "NYSE"}
 
 
 async def _fetch_fundamentals_fmp(client: httpx.AsyncClient, asset: dict) -> Optional[dict]:
-    """Financial Modeling Prep free tier covers US-listed companies only."""
+    """Financial Modeling Prep free tier (250 calls/day) covers US-listed
+    companies only, so this is only attempted for NASDAQ/NYSE symbols.
+    Two lightweight calls per stock: key-metrics + ratios (both 'stable'
+    endpoints, TTM snapshot, no history)."""
     if not FMP_API_KEY or asset["market"] not in _US_MARKETS:
         return None
 
@@ -237,6 +252,7 @@ async def _fetch_fundamentals_fmp(client: httpx.AsyncClient, asset: dict) -> Opt
     pb_ratio = _num(ratios.get("priceToBookRatioTTM"))
     eps = _num(metrics.get("netIncomePerShareTTM"))
     roe = _num(ratios.get("returnOnEquityTTM"))
+    revenue_growth = None  # not on the TTM snapshot endpoints; would need a 3rd call
     debt_to_equity = _num(ratios.get("debtToEquityRatioTTM"))
     dividend_yield = _num(ratios.get("dividendYieldTTM"))
 
@@ -252,7 +268,7 @@ async def _fetch_fundamentals_fmp(client: httpx.AsyncClient, asset: dict) -> Opt
         "pb_ratio": pb_ratio,
         "eps": eps,
         "roe": roe * 100 if roe is not None else None,
-        "revenue_growth": None,
+        "revenue_growth": revenue_growth,
         "profit_growth": None,
         "debt_to_equity": debt_to_equity,
         "dividend_yield": dividend_yield * 100 if dividend_yield is not None else None,
@@ -262,15 +278,26 @@ async def _fetch_fundamentals_fmp(client: httpx.AsyncClient, asset: dict) -> Opt
 
 async def fetch_fundamentals(client: httpx.AsyncClient, asset: dict) -> dict:
     """Company fundamentals, real where a free tier actually covers the
-    symbol, demo fallback otherwise."""
+    symbol, demo fallback otherwise. Only meaningful for stocks; other
+    asset types report unavailable, same as the demo build.
+
+    Order of attempts:
+    1. Financial Modeling Prep (US-listed stocks only, free tier scope)
+    2. Twelve Data /statistics (free tier usually 402s outside a paid plan,
+       kept as a second attempt in case that ever changes for a symbol)
+    3. Demo fundamentals (deterministic, clearly labelled)
+    """
     if asset["asset_type"] != "stock":
-        return _demo_build_fundamentals(asset)
+        return _demo_build_fundamentals(asset)  # returns the "not applicable" shape
 
     fmp_result = await _fetch_fundamentals_fmp(client, asset)
     if fmp_result:
         return fmp_result
 
     if not TWELVE_DATA_API_KEY or asset["market"] not in _US_MARKETS:
+        # Twelve Data's /statistics free tier reliably 402s for non-US
+        # symbols (confirmed in practice) — skip the wasted call entirely
+        # so it doesn't eat into the 800/day price-history budget.
         return _demo_build_fundamentals(asset)
 
     td_symbol = await _twelve_data_symbol(client, asset["symbol"], asset["market"], asset["asset_type"])
@@ -302,6 +329,8 @@ async def fetch_fundamentals(client: httpx.AsyncClient, asset: dict) -> dict:
     dividend_yield = _num(stock_stats.get("dividend_yield")) or _num(valuation.get("forward_annual_dividend_yield"))
 
     if market_cap is None and pe_ratio is None:
+        # Statistics endpoint often needs a paid plan for non-US symbols —
+        # fall back to demo fundamentals rather than showing all-None fields.
         return _demo_build_fundamentals(asset)
 
     return {
@@ -322,7 +351,9 @@ async def fetch_fundamentals(client: httpx.AsyncClient, asset: dict) -> dict:
 
 
 async def fetch_news(client: httpx.AsyncClient, assets: List[dict], per_asset: int = 3) -> List[dict]:
-    """Finance news + sentiment from Marketaux."""
+    """Finance news + sentiment from Marketaux, filtered per symbol.
+    Falls back to demo news (clearly labelled) when no key is set or a
+    request fails, so the News page never renders empty."""
     if not MARKETAUX_API_KEY:
         return _demo_build_news(assets, per_asset=per_asset)
 
@@ -361,7 +392,7 @@ async def fetch_news(client: httpx.AsyncClient, assets: List[dict], per_asset: i
                     "data_source": DATA_SOURCE,
                 }
             )
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.3)  # stay well under free-tier rate limits
 
     if not news:
         logger.warning("No live news fetched — using demo fallback for News page")
@@ -379,8 +410,12 @@ def _parse_dt(value: Optional[str]) -> datetime:
 
 
 async def build_all(assets: List[dict]) -> tuple[Dict[str, List[dict]], List[dict], List[dict], Dict[str, bool]]:
-    """Fetch price history + fundamentals for every asset and news once for
-    the whole universe. Returns (prices_by_symbol, fundamentals, news, price_is_live)."""
+    """Fetch price history + fundamentals for every asset (rate-limit aware,
+    small delay between calls) and news once for the whole universe.
+    Returns (prices_by_symbol, fundamentals, news, price_is_live) — the last
+    dict lets seed.py print a per-symbol LIVE/DEMO summary so a bad symbol
+    mapping or exhausted quota is visible immediately instead of silently
+    showing stale/synthetic numbers with no indication anything fell back."""
     prices: Dict[str, List[dict]] = {}
     fundamentals: List[dict] = []
     price_is_live: Dict[str, bool] = {}
