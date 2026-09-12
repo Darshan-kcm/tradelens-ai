@@ -2,7 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Clock, Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { PriceTrendChart, RsiChart } from "@/components/charts/Charts";
+import { CandlestickChart } from "@/components/charts/CandlestickChart";
+import { RsiChart } from "@/components/charts/Charts";
 import { Delta, PageHeader, SectionCard, StateBlock } from "@/components/common/Widgets";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -248,11 +249,11 @@ export default function Markets() {
             </StateBlock>
           </SectionCard>
 
-          <SectionCard testId="markets-chart-card" title="Price & indicators" subtitle="Daily demo candles, last 180 bars">
+           <SectionCard testId="markets-chart-card" title="Price & indicators" subtitle="Daily candles with EMA 21/50 overlay and volume, last 400 bars">
             <StateBlock loading={priceQuery.isLoading} error={priceQuery.isError} testId="markets-price">
               {priceQuery.data && (
                 <div className="space-y-3">
-                  <PriceTrendChart candles={priceQuery.data.candles} testId="markets-price-chart" />
+                  <CandlestickChart candles={priceQuery.data.candles} testId="markets-price-chart" />
                   <RsiChart candles={priceQuery.data.candles} testId="markets-rsi-chart" />
                 </div>
               )}
