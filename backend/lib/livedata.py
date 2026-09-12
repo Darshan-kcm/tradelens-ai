@@ -1,21 +1,26 @@
 """LIVE data fetcher for TradeLens AI.
 
 Replaces backend/lib/demodata.py as the data source. Pulls real quotes, daily
-OHLCV history, and company fundamentals from Twelve Data (twelvedata.com,
-free tier: 800 calls/day, 8 calls/min) and finance news from Marketaux
-(marketaux.com, free tier). Both need a free API key — see README /
-LOCAL_SETUP for signup steps.
+OHLCV history from Twelve Data (twelvedata.com, free tier: 800 calls/day, 8
+calls/min), fundamentals from Financial Modeling Prep for US stocks (free
+tier: 250 calls/day, US-listed only) with a Twelve Data fallback attempt,
+and finance news from Marketaux (marketaux.com, free tier). All three need a
+free API key — see README / LOCAL_SETUP for signup steps.
 
 Design notes:
 - This module keeps the same UNIVERSE list and asset/bar/fundamental/news
   *shapes* as demodata.py so store.py, the routers and the frontend never
   need to change — only seed.py's import + call changes.
 - Free tiers are rate-limited, so this fetches once per run (a periodic
-  refresh job, e.g. a daily cron / Render "Cron Job", re-runs seed.py to
-  refresh). It is NOT called per-request.
+  refresh job, e.g. the GitHub Actions workflow in
+  .github/workflows/daily-refresh.yml, re-runs seed.py to refresh). It is
+  NOT called per-request.
 - Every network call is wrapped so a single failed/rate-limited symbol
   doesn't kill the whole seed — it's skipped and logged, and DEMO fallback
   data is used for that symbol so the app never shows a broken page.
+- build_all() returns a per-symbol LIVE/DEMO flag so seed.py can print a
+  summary table — a bad symbol mapping or exhausted quota is then visible
+  immediately in the seed output instead of silently showing wrong numbers.
 """
 from __future__ import annotations
 
@@ -42,21 +47,28 @@ DATA_SOURCE = "LIVE"
 
 TWELVE_DATA_API_KEY = os.environ.get("TWELVE_DATA_API_KEY", "").strip()
 MARKETAUX_API_KEY = os.environ.get("MARKETAUX_API_KEY", "").strip()
+FMP_API_KEY = os.environ.get("FMP_API_KEY", "").strip()
 
 TWELVE_DATA_BASE = "https://api.twelvedata.com"
 MARKETAUX_BASE = "https://api.marketaux.com/v1"
+FMP_BASE = "https://financialmodelingprep.com/stable"
 
 HISTORY_DAYS = 400
 
 # Twelve Data needs an exchange suffix for NSE/BSE symbols; everything else
 # (US tickers, indices, forex pairs, crypto, commodities) uses the plain
 # TradeLens symbol or a small remap below.
+#
+# Index tickers verified against Twelve Data's own /indices catalogue and
+# Wikipedia's "Trading symbol" field — NOT guessed. A wrong index symbol
+# silently resolves to "no data" -> demo fallback, which is what caused
+# NIFTY 50 to show a stale/synthetic value instead of the real ~24-25k level.
 _TWELVE_DATA_SYMBOL_OVERRIDES = {
-    "NIFTY50": "NIFTY 50",
-    "SENSEX": "SENSEX",
-    "BANKNIFTY": "NIFTY BANK",
+    "NIFTY50": "NSEI",       # NSE NIFTY 50, ticker NSEI (not the literal name "NIFTY 50")
+    "SENSEX": "BSESN",       # BSE SENSEX, ticker BSESN
+    "BANKNIFTY": "NSEBANK",  # NSE BANK NIFTY
     "NASDAQ": "IXIC",
-    "SPX": "SPX",
+    "SPX": "GSPC",           # S&P 500, ticker GSPC (not "SPX")
     "GOLD": "XAU/USD",
     "SILVER": "XAG/USD",
     "CRUDEOIL": "WTI/USD",
@@ -105,12 +117,13 @@ async def _get_json(client: httpx.AsyncClient, url: str, params: dict, retries: 
     return None
 
 
-async def fetch_price_history(client: httpx.AsyncClient, asset: dict) -> List[dict]:
+async def fetch_price_history(client: httpx.AsyncClient, asset: dict) -> tuple[List[dict], bool]:
     """Daily OHLCV bars from Twelve Data, oldest first. Falls back to
     deterministic demo bars if the API key is missing or the call fails,
-    so the app degrades gracefully instead of breaking."""
+    so the app degrades gracefully instead of breaking.
+    Returns (bars, is_live) so callers can report per-symbol status."""
     if not TWELVE_DATA_API_KEY:
-        return _demo_build_price_history(asset)
+        return _demo_build_price_history(asset), False
 
     td_symbol = _twelve_data_symbol(asset["symbol"], asset["market"])
     data = await _get_json(
@@ -126,7 +139,7 @@ async def fetch_price_history(client: httpx.AsyncClient, asset: dict) -> List[di
     values = (data or {}).get("values")
     if not values:
         logger.warning("No live price data for %s (%s) — using demo fallback", asset["symbol"], td_symbol)
-        return _demo_build_price_history(asset)
+        return _demo_build_price_history(asset), False
 
     bars = []
     for v in reversed(values):  # Twelve Data returns newest first
@@ -145,17 +158,90 @@ async def fetch_price_history(client: httpx.AsyncClient, asset: dict) -> List[di
         except (KeyError, ValueError):
             continue
     if len(bars) < 2:
-        return _demo_build_price_history(asset)
-    return bars
+        return _demo_build_price_history(asset), False
+    return bars, True
+
+
+_US_MARKETS = {"NASDAQ", "NYSE"}
+
+
+async def _fetch_fundamentals_fmp(client: httpx.AsyncClient, asset: dict) -> Optional[dict]:
+    """Financial Modeling Prep free tier (250 calls/day) covers US-listed
+    companies only, so this is only attempted for NASDAQ/NYSE symbols.
+    Two lightweight calls per stock: key-metrics + ratios (both 'stable'
+    endpoints, TTM snapshot, no history)."""
+    if not FMP_API_KEY or asset["market"] not in _US_MARKETS:
+        return None
+
+    symbol = asset["symbol"]
+    metrics_data = await _get_json(
+        client, f"{FMP_BASE}/key-metrics-ttm", {"symbol": symbol, "apikey": FMP_API_KEY}
+    )
+    ratios_data = await _get_json(
+        client, f"{FMP_BASE}/ratios-ttm", {"symbol": symbol, "apikey": FMP_API_KEY}
+    )
+    metrics = (metrics_data or [{}])[0] if isinstance(metrics_data, list) and metrics_data else {}
+    ratios = (ratios_data or [{}])[0] if isinstance(ratios_data, list) and ratios_data else {}
+    if not metrics and not ratios:
+        return None
+
+    def _num(v):
+        try:
+            return float(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    market_cap = _num(metrics.get("marketCap"))
+    pe_ratio = _num(ratios.get("priceToEarningsRatioTTM"))
+    pb_ratio = _num(ratios.get("priceToBookRatioTTM"))
+    eps = _num(metrics.get("netIncomePerShareTTM"))
+    roe = _num(ratios.get("returnOnEquityTTM"))
+    revenue_growth = None  # not on the TTM snapshot endpoints; would need a 3rd call
+    debt_to_equity = _num(ratios.get("debtToEquityRatioTTM"))
+    dividend_yield = _num(ratios.get("dividendYieldTTM"))
+
+    if market_cap is None and pe_ratio is None:
+        return None
+
+    return {
+        "symbol": symbol,
+        "available": True,
+        "note": None,
+        "market_cap": market_cap,
+        "pe_ratio": pe_ratio,
+        "pb_ratio": pb_ratio,
+        "eps": eps,
+        "roe": roe * 100 if roe is not None else None,
+        "revenue_growth": revenue_growth,
+        "profit_growth": None,
+        "debt_to_equity": debt_to_equity,
+        "dividend_yield": dividend_yield * 100 if dividend_yield is not None else None,
+        "data_source": DATA_SOURCE,
+    }
 
 
 async def fetch_fundamentals(client: httpx.AsyncClient, asset: dict) -> dict:
-    """Company fundamentals from Twelve Data's /statistics endpoint.
-    Only meaningful for stocks; other asset types report unavailable, same
-    as the demo build."""
+    """Company fundamentals, real where a free tier actually covers the
+    symbol, demo fallback otherwise. Only meaningful for stocks; other
+    asset types report unavailable, same as the demo build.
+
+    Order of attempts:
+    1. Financial Modeling Prep (US-listed stocks only, free tier scope)
+    2. Twelve Data /statistics (free tier usually 402s outside a paid plan,
+       kept as a second attempt only for US symbols FMP couldn't fill)
+    3. Demo fundamentals (deterministic, clearly labelled)
+    """
     if asset["asset_type"] != "stock":
         return _demo_build_fundamentals(asset)  # returns the "not applicable" shape
-    if not TWELVE_DATA_API_KEY:
+
+    fmp_result = await _fetch_fundamentals_fmp(client, asset)
+    if fmp_result:
+        return fmp_result
+
+    if not TWELVE_DATA_API_KEY or asset["market"] not in _US_MARKETS:
+        # Twelve Data's /statistics free tier reliably 402s for non-US
+        # symbols (confirmed in practice) — skip the wasted call entirely
+        # so it doesn't eat into the 800/day price-history budget.
         return _demo_build_fundamentals(asset)
 
     td_symbol = _twelve_data_symbol(asset["symbol"], asset["market"])
@@ -185,8 +271,6 @@ async def fetch_fundamentals(client: httpx.AsyncClient, asset: dict) -> dict:
     dividend_yield = _num(stock_stats.get("dividend_yield")) or _num(valuation.get("forward_annual_dividend_yield"))
 
     if market_cap is None and pe_ratio is None:
-        # Statistics endpoint often needs a paid plan for non-US symbols —
-        # fall back to demo fundamentals rather than showing all-None fields.
         return _demo_build_fundamentals(asset)
 
     return {
@@ -265,20 +349,26 @@ def _parse_dt(value: Optional[str]) -> datetime:
         return datetime.now(timezone.utc)
 
 
-async def build_all(assets: List[dict]) -> tuple[Dict[str, List[dict]], List[dict], List[dict]]:
+async def build_all(assets: List[dict]) -> tuple[Dict[str, List[dict]], List[dict], List[dict], Dict[str, bool]]:
     """Fetch price history + fundamentals for every asset (rate-limit aware,
     small delay between calls) and news once for the whole universe.
-    Returns (prices_by_symbol, fundamentals, news)."""
+    Returns (prices_by_symbol, fundamentals, news, price_is_live) — the last
+    dict lets seed.py print a per-symbol LIVE/DEMO summary so a bad symbol
+    mapping or exhausted quota is visible immediately instead of silently
+    showing stale/synthetic numbers with no indication anything fell back."""
     prices: Dict[str, List[dict]] = {}
     fundamentals: List[dict] = []
+    price_is_live: Dict[str, bool] = {}
 
     async with httpx.AsyncClient() as client:
         for asset in assets:
-            prices[asset["symbol"]] = await fetch_price_history(client, asset)
+            bars, is_live = await fetch_price_history(client, asset)
+            prices[asset["symbol"]] = bars
+            price_is_live[asset["symbol"]] = is_live
             fundamentals.append(await fetch_fundamentals(client, asset))
             if TWELVE_DATA_API_KEY:
                 await asyncio.sleep(0.8)  # ~8 calls/min free-tier ceiling, 2 calls/asset
 
         news = await fetch_news(client, assets)
 
-    return prices, fundamentals, news
+    return prices, fundamentals, news, price_is_live

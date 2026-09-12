@@ -1,9 +1,9 @@
 """Idempotent seeder for TradeLens AI.
 
-By default this pulls LIVE data (Twelve Data prices/fundamentals, Marketaux
-news) if TWELVE_DATA_API_KEY / MARKETAUX_API_KEY are set in backend/.env.
-Any symbol or feed that fails or isn't configured falls back to clearly
-labelled DEMO data automatically, so the app never breaks.
+By default this pulls LIVE data (Twelve Data prices, FMP fundamentals for
+US stocks, Marketaux news) if the corresponding API keys are set in
+backend/.env. Any symbol or feed that fails or isn't configured falls back
+to clearly labelled DEMO data automatically, so the app never breaks.
 
 Run:  cd backend && python seed.py            # live data (needs API keys)
 Run:  cd backend && python seed.py --demo     # force demo/synthetic data
@@ -45,6 +45,7 @@ async def main() -> None:
         prices = {a["symbol"]: demodata.build_price_history(a) for a in assets}
         fundamentals = [demodata.build_fundamentals(a) for a in assets]
         news = demodata.build_news(assets)
+        price_is_live = {a["symbol"]: False for a in assets}
     else:
         from lib import livedata
 
@@ -53,7 +54,7 @@ async def main() -> None:
         if not livedata.MARKETAUX_API_KEY:
             print("MARKETAUX_API_KEY not set in backend/.env — falling back to DEMO news.")
         print("fetching live data (this respects free-tier rate limits, may take a few minutes)...")
-        prices, fundamentals, news = await livedata.build_all(assets)
+        prices, fundamentals, news, price_is_live = await livedata.build_all(assets)
 
     total_bars = 0
     for symbol, bars in prices.items():
@@ -90,6 +91,14 @@ async def main() -> None:
     await db.users.create_index("email", unique=True)
     await db.backtest_results.create_index("created_at")
     print(f"inserted {len(users)} demo users")
+
+    live_symbols = [s for s, ok in price_is_live.items() if ok]
+    demo_symbols = [s for s, ok in price_is_live.items() if not ok]
+    print(f"\nprice data source — LIVE: {len(live_symbols)} symbols, DEMO fallback: {len(demo_symbols)} symbols")
+    if demo_symbols:
+        print(f"  fell back to demo: {', '.join(sorted(demo_symbols))}")
+        print("  (check the warnings printed above for the exact API error per symbol)")
+
     mode = "DEMO (synthetic)" if force_demo else "LIVE where available, DEMO fallback otherwise"
     print(f"seed complete - data mode: {mode}.")
 
