@@ -1,30 +1,20 @@
 """LIVE data fetcher for TradeLens AI.
 
-Replaces backend/lib/demodata.py as the data source. Pulls real quotes, daily
-OHLCV history from Twelve Data (twelvedata.com, free tier: 800 calls/day, 8
-calls/min), fundamentals from Financial Modeling Prep for US stocks (free
-tier: 250 calls/day, US-listed only) with a Twelve Data fallback attempt,
-and finance news from Marketaux (marketaux.com, free tier). All three need a
-free API key — see README / LOCAL_SETUP for signup steps.
+Replaces backend/lib/demodata.py as the data source. Routes each asset to
+whichever free source actually covers it:
+- Indian NSE/BSE stocks + every index -> Yahoo Finance (yahoodata.py, no
+  API key, no daily quota), since Twelve Data's free plan excludes both.
+- US stocks, forex, crypto, commodities -> Twelve Data (free tier: 800
+  calls/day, 8 calls/min).
+Fundamentals: Financial Modeling Prep for US stocks (free tier: 250
+calls/day, US-listed only), Twelve Data /statistics as a second attempt,
+demo fallback otherwise. News: Marketaux.
 
-Design notes:
-- This module keeps the same UNIVERSE list and asset/bar/fundamental/news
-  *shapes* as demodata.py so store.py, the routers and the frontend never
-  need to change — only seed.py's import + call changes.
-- Every Twelve Data call is paced individually (see _get_json_td) to respect
-  the free tier's 8 calls/minute ceiling — earlier pacing was approximated
-  once per asset, which under-counted when an asset needed 2+ Twelve Data
-  calls (e.g. an index doing symbol_search then time_series) and burst past
-  the limit, causing unrelated symbols to fail in the same run.
-- Every network call is wrapped so a single failed/rate-limited symbol
-  doesn't kill the whole seed — it's skipped and logged, and DEMO fallback
-  data is used for that symbol so the app never shows a broken page.
-- build_all() returns a per-symbol LIVE/DEMO flag so seed.py can print a
-  summary table — a bad symbol mapping or exhausted quota is then visible
-  immediately in the seed output instead of silently showing wrong numbers.
-- Index tickers are resolved via Twelve Data's own symbol_search endpoint
-  (not hardcoded), restricted to instrument_type == "Index" only — never an
-  ETF proxy, since those are frequently paid-plan-only on the free tier.
+Every network call is wrapped so a single failed/rate-limited symbol
+doesn't kill the whole seed — it's skipped and logged, and DEMO fallback
+data is used for that symbol so the app never shows a broken page.
+build_all() returns a per-symbol LIVE/DEMO flag so seed.py can print a
+summary table.
 """
 from __future__ import annotations
 
@@ -44,6 +34,7 @@ from lib.demodata import (
     build_news as _demo_build_news,
     build_price_history as _demo_build_price_history,
 )
+from lib import yahoodata
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +50,10 @@ FMP_BASE = "https://financialmodelingprep.com/stable"
 
 HISTORY_DAYS = 400
 
+# Indices and Indian NSE/BSE stocks never reach this module at all —
+# fetch_price_history() routes them to yahoodata.py first (see covers()),
+# since Twelve Data's free plan explicitly excludes both India and every
+# index instrument (confirmed via direct API responses during development).
 _TWELVE_DATA_SYMBOL_OVERRIDES = {
     "GOLD": "XAU/USD",
     "SILVER": "XAG/USD",
@@ -73,21 +68,15 @@ _TWELVE_DATA_SYMBOL_OVERRIDES = {
     "USDJPY": "USD/JPY",
     "USDINR": "USD/INR",
 }
-_NSE_SYMBOLS = {"RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "ITC", "TATAMOTORS", "SBIN", "SUNPHARMA", "LT", "BHARTIARTL"}
 
-_INDEX_SEARCH_TERMS = {
-    "NIFTY50": "NIFTY 50",
-    "SENSEX": "SENSEX",
-    "BANKNIFTY": "NIFTY BANK",
-    "NASDAQ": "NASDAQ Composite",
-    "SPX": "S&P 500",
-}
-_index_symbol_cache: Dict[str, Optional[str]] = {}
+
+def _twelve_data_symbol(symbol: str, market: str) -> str:
+    if symbol in _TWELVE_DATA_SYMBOL_OVERRIDES:
+        return _TWELVE_DATA_SYMBOL_OVERRIDES[symbol]
+    return symbol
 
 
 def build_assets() -> List[dict]:
-    """Asset metadata is static reference data (name/market/sector) — reuse it
-    as-is from demodata.py, just relabel the source."""
     assets = _demo_build_assets()
     for a in assets:
         a["data_source"] = DATA_SOURCE
@@ -111,65 +100,25 @@ async def _get_json(client: httpx.AsyncClient, url: str, params: dict, retries: 
 
 async def _get_json_td(client: httpx.AsyncClient, url: str, params: dict, retries: int = 2) -> Optional[dict]:
     """Same as _get_json, but paced for Twelve Data's free-tier ceiling of
-    8 calls/minute. Every Twelve Data call goes through this so the limit
-    is enforced at the actual call site."""
+    8 calls/minute."""
     if TWELVE_DATA_API_KEY:
-        await asyncio.sleep(7.6)  # ~7.9 calls/min, just under the 8/min ceiling
+        await asyncio.sleep(7.6)
     return await _get_json(client, url, params, retries=retries)
 
 
-async def _resolve_index_symbol(client: httpx.AsyncClient, tradelens_symbol: str) -> Optional[str]:
-    """Look up the real ticker Twelve Data expects for an index, via their
-    own symbol_search endpoint. Only ever returns an instrument_type ==
-    "Index" match — never an ETF or other proxy instrument, since those are
-    frequently paid-plan-only on the free tier."""
-    if tradelens_symbol in _index_symbol_cache:
-        return _index_symbol_cache[tradelens_symbol]
-
-    query = _INDEX_SEARCH_TERMS.get(tradelens_symbol, tradelens_symbol)
-    data = await _get_json_td(
-        client,
-        f"{TWELVE_DATA_BASE}/symbol_search",
-        {"symbol": query, "apikey": TWELVE_DATA_API_KEY, "outputsize": 10},
-    )
-    candidates = (data or {}).get("data") or []
-    resolved = next(
-        (c.get("symbol") for c in candidates if c.get("instrument_type") == "Index"),
-        None,
-    )
-
-    if not resolved:
-        logger.warning(
-            "symbol_search found no Index-type match for %s (query %r); candidates were: %s",
-            tradelens_symbol,
-            query,
-            [(c.get("symbol"), c.get("instrument_type")) for c in candidates],
-        )
-    _index_symbol_cache[tradelens_symbol] = resolved
-    return resolved
-
-
-async def _twelve_data_symbol(client: httpx.AsyncClient, symbol: str, market: str, asset_type: str) -> Optional[str]:
-    if asset_type == "index":
-        return await _resolve_index_symbol(client, symbol)
-    if symbol in _TWELVE_DATA_SYMBOL_OVERRIDES:
-        return _TWELVE_DATA_SYMBOL_OVERRIDES[symbol]
-    if symbol in _NSE_SYMBOLS or market == "NSE":
-        return f"{symbol}:NSE"
-    return symbol
-
-
 async def fetch_price_history(client: httpx.AsyncClient, asset: dict) -> tuple[List[dict], bool]:
-    """Daily OHLCV bars from Twelve Data, oldest first. Falls back to
-    deterministic demo bars if the API key is missing or the call fails.
-    Returns (bars, is_live)."""
+    """Daily OHLCV bars, oldest first. Routes Indian stocks/indices to
+    Yahoo Finance, everything else to Twelve Data. Returns (bars, is_live)."""
+    if yahoodata.covers(asset):
+        bars, is_live = await yahoodata.fetch_price_history(asset, HISTORY_DAYS)
+        if is_live:
+            return bars, True
+        return _demo_build_price_history(asset), False
+
     if not TWELVE_DATA_API_KEY:
         return _demo_build_price_history(asset), False
 
-    td_symbol = await _twelve_data_symbol(client, asset["symbol"], asset["market"], asset["asset_type"])
-    if not td_symbol:
-        return _demo_build_price_history(asset), False
-
+    td_symbol = _twelve_data_symbol(asset["symbol"], asset["market"])
     data = await _get_json_td(
         client,
         f"{TWELVE_DATA_BASE}/time_series",
@@ -210,7 +159,6 @@ _US_MARKETS = {"NASDAQ", "NYSE"}
 
 
 async def _fetch_fundamentals_fmp(client: httpx.AsyncClient, asset: dict) -> Optional[dict]:
-    """Financial Modeling Prep free tier covers US-listed companies only."""
     if not FMP_API_KEY or asset["market"] not in _US_MARKETS:
         return None
 
@@ -261,8 +209,6 @@ async def _fetch_fundamentals_fmp(client: httpx.AsyncClient, asset: dict) -> Opt
 
 
 async def fetch_fundamentals(client: httpx.AsyncClient, asset: dict) -> dict:
-    """Company fundamentals, real where a free tier actually covers the
-    symbol, demo fallback otherwise."""
     if asset["asset_type"] != "stock":
         return _demo_build_fundamentals(asset)
 
@@ -273,9 +219,7 @@ async def fetch_fundamentals(client: httpx.AsyncClient, asset: dict) -> dict:
     if not TWELVE_DATA_API_KEY or asset["market"] not in _US_MARKETS:
         return _demo_build_fundamentals(asset)
 
-    td_symbol = await _twelve_data_symbol(client, asset["symbol"], asset["market"], asset["asset_type"])
-    if not td_symbol:
-        return _demo_build_fundamentals(asset)
+    td_symbol = _twelve_data_symbol(asset["symbol"], asset["market"])
     data = await _get_json_td(
         client,
         f"{TWELVE_DATA_BASE}/statistics",
@@ -322,7 +266,6 @@ async def fetch_fundamentals(client: httpx.AsyncClient, asset: dict) -> dict:
 
 
 async def fetch_news(client: httpx.AsyncClient, assets: List[dict], per_asset: int = 3) -> List[dict]:
-    """Finance news + sentiment from Marketaux."""
     if not MARKETAUX_API_KEY:
         return _demo_build_news(assets, per_asset=per_asset)
 
@@ -379,8 +322,6 @@ def _parse_dt(value: Optional[str]) -> datetime:
 
 
 async def build_all(assets: List[dict]) -> tuple[Dict[str, List[dict]], List[dict], List[dict], Dict[str, bool]]:
-    """Fetch price history + fundamentals for every asset and news once for
-    the whole universe. Returns (prices_by_symbol, fundamentals, news, price_is_live)."""
     prices: Dict[str, List[dict]] = {}
     fundamentals: List[dict] = []
     price_is_live: Dict[str, bool] = {}
