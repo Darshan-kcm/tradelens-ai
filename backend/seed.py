@@ -90,6 +90,8 @@ async def main() -> None:
     await db.users.insert_many(users)
     await db.users.create_index("email", unique=True)
     await db.backtest_results.create_index("created_at")
+    await db.verification_codes.create_index([("email", 1), ("purpose", 1), ("created_at", -1)])
+    await db.verification_codes.create_index("expires_at", expireAfterSeconds=0)
     print(f"inserted {len(users)} demo users")
 
     live_symbols = [s for s, ok in price_is_live.items() if ok]

@@ -306,11 +306,21 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class RequestCodeInput(BaseModel):
+    email: str
+
+
 class SignupRequest(BaseModel):
     name: str
     email: str
     password: str
+    code: str
 
+
+class ResetPasswordRequest(BaseModel):
+    email: str
+    code: str
+    new_password: str
 
 class User(BaseModel):
     id: str
