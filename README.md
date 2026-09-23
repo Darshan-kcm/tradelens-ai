@@ -181,9 +181,9 @@ the frontend changes: it only speaks to `/api`.
 
 ## 9. Module division (two students)
 
-- **Student 1 — Frontend & UX:** `frontend/` — pages, charts, components,
+-  dipanshu— Frontend & UX:** `frontend/` — pages, charts, components,
   responsive layout, API integration.
-- **Student 2 — Backend, data & analytics:** `backend/` — FastAPI routers,
+- Darshan  — Backend, data & analytics:** `backend/` — FastAPI routers,
   database, indicators, screener, news/fundamentals processing, backtesting.
 
 Both sides meet only at the REST boundary: a Pydantic model in
